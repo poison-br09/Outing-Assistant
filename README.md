@@ -34,6 +34,13 @@ form / chat ─▶ 1 parseUserPreferences ─▶ 2 resolveTemporalContext ─▶
 | 13 | validatePlan | `tools/plan_validator.py` | budget (+10% rule), timing, hours, diet, weather, crowds |
 | 14 | generateFinalPlan | `tools/final_plan_generator.py` | only after explicit approval |
 
+### Extras beyond the 14 tools
+- **Map and navigation:** each plan has an in-app map, a per-stop "Go" link and a whole-route Google Maps link (`route_url`).
+- **Opening-hours verification** (`tools/venue_verifier.py`): venues missing hours are looked up in Geoapify Place Details (bounded, parallel). The parser also understands public-holiday rules. Hours remain provider data and stay labelled unverified.
+- **Calendar export** (`tools/calendar_export.py`): the final plan includes a `.ics` file (one event per stop, UTC times, escaped and folded per RFC 5545) and a Google Calendar link.
+- **Multi-day trips** (`POST /api/v1/trip`, or set *Days* to 2-5 in the form): one plan per consecutive day, the budget split per day after your *fixed costs* (lodging, intercity travel), and no venue repeated across days. Lodging and intercity travel are never estimated. Each day is approved separately.
+- **Intentionally not built:** accounts, saved outings and preference learning (they need persistence, and this project is stateless by design), and event discovery (no events provider configured).
+
 ### Behaviour worth knowing
 - **Budget:** the stated budget is a hard limit. The optional 10% extension only applies if the user chose "Yes" or ticked the approval box ("Show me the option and let me decide"). Finalisation re-validates server-side.
 - **Exact timing** is never violated; tentative timing may shift within the declared flexibility; period timing lets the optimiser pick the best start.
@@ -85,7 +92,8 @@ docker run --env-file .env -p 8501:8501 outing-assistant   # open http://localho
 - `GET /health`: configuration status (no secrets)
 - `GET /metrics`: Nemotron call, error, timeout and latency counters
 - `POST /api/v1/plan`: `{fields, message, message_overrides, excluded_venue_ids}` returns clarification questions, proposals, or a labelled fallback, plus the trace
-- `POST /api/v1/finalize`: `{preferences, proposal, temporal, weather, approved, accept_extra_budget}` returns the final plan (403 without approval)
+- `POST /api/v1/trip`: `{plan, days (2-5), fixed_costs}` returns one day plan per day plus the trip total
+- `POST /api/v1/finalize`: `{preferences, proposal, temporal, weather, approved, accept_extra_budget}` returns the final plan with route and calendar links (403 without approval)
 
 ## Known limitations
 - Venue prices are estimates; hours and diet data depend on provider coverage (OpenStreetMap-derived data is thinner in some areas).

@@ -5,7 +5,7 @@ Read `instruction.md` (rules), `plan.md` (full product brief) and `project-requi
 ## Layout
 ```
 backend/app/
-  main.py            FastAPI app: /health, /metrics, /api/v1/plan, /api/v1/finalize
+  main.py            FastAPI app: /health, /metrics, /api/v1/plan, /api/v1/trip, /api/v1/finalize
   config.py          env-driven Settings and assumptions loader
   schemas/           Pydantic models (preferences, context, itinerary, api)
   llm/client.py      Nemotron client: retry, JSON validation, metrics
@@ -17,6 +17,10 @@ backend/tests/       pytest, no network
 frontend/app.py      Streamlit: form tab + chat tab
 Dockerfile, start.sh, render.yaml
 ```
+
+## Out of scope (by design)
+No accounts, saved outings, preference learning or event discovery: the app is stateless and has no events provider.
+Extras beyond the 14 tools: `tools/venue_verifier.py`, `tools/calendar_export.py`, `Orchestrator.run_trip`.
 
 ## Commands
 - Setup: `python -m venv .venv && . .venv/bin/activate && pip install -r requirements-dev.txt`
