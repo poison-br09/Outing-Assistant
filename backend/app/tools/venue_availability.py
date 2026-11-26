@@ -11,7 +11,7 @@ from ..schemas.context import Availability
 from ..schemas.itinerary import Venue
 
 _DAYS = ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]
-_DAY = "(?:Mo|Tu|We|Th|Fr|Sa|Su)"
+_DAY = "(?:Mo|Tu|We|Th|Fr|Sa|Su|PH|SH)"  # PH/SH = public/school holidays (not modelled)
 _RULE = re.compile(rf"^({_DAY}(?:[-,]{_DAY})*)?\s*(.*)$")
 _RANGE = re.compile(r"(\d{1,2}):(\d{2})\s*-\s*(\d{1,2}):(\d{2})")
 
@@ -23,6 +23,8 @@ def _days(spec: Optional[str]) -> list[int]:
         return list(range(7))
     out: list[int] = []
     for part in spec.split(","):
+        if part in ("PH", "SH"):
+            continue  # holiday-specific rules are ignored, flagged in the availability note
         if "-" in part:
             a, b = (_DAYS.index(x) for x in part.split("-"))
             out += [(a + i) % 7 for i in range(((b - a) % 7) + 1)]
@@ -42,6 +44,8 @@ def parse_opening_hours(text: str) -> Optional[Schedule]:
         if not m:
             return None
         days, rest = _days(m.group(1)), m.group(2).strip().lower()
+        if m.group(1) and not days:
+            continue  # rule only applies to holidays
         if rest in ("off", "closed"):
             for d in days:
                 sched[d] = []
@@ -76,7 +80,9 @@ def get_venue_availability(venue: Venue, start: dt.datetime, end: dt.datetime) -
             note="Opening hours could not be interpreted; confirm before going.",
         )
     ok = _open_during(sched, start, end)
-    return Availability(
-        status="open" if ok else "closed", hours_text=venue.opening_hours,
-        note=None if ok else "Provider hours indicate it is closed for the planned visit.",
-    )
+    src = "Geoapify place details" if venue.hours_source == "place_details" else "place search data (OpenStreetMap)"
+    notes = [] if ok else ["Provider hours indicate it is closed for the planned visit."]
+    if "PH" in venue.opening_hours:
+        notes.append("Public-holiday hours are not checked.")
+    return Availability(status="open" if ok else "closed", hours_text=venue.opening_hours,
+                        source=src, note=" ".join(notes) or None)

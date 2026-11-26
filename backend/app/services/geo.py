@@ -101,3 +101,16 @@ def search_places(
         params["conditions"] = ",".join(conditions)
     data = _get("geoapify", f"{s.geoapify_base_url}/v2/places", params)
     return [f["properties"] for f in data.get("features", [])]
+
+
+def fetch_place_details(place_id: str) -> dict:
+    """Geoapify Place Details: used to fill in opening hours/website the place search omitted."""
+    s = get_settings()
+    data = _get(
+        "geoapify", f"{s.geoapify_base_url}/v2/place-details",
+        {"id": place_id, "features": "details", "apiKey": _geoapify_key()},
+    )
+    merged: dict = {}
+    for f in data.get("features", []):
+        merged.update({k: v for k, v in (f.get("properties") or {}).items() if v})
+    return merged

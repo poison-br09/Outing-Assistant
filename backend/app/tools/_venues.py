@@ -21,13 +21,14 @@ def to_venue(props: dict, kind: str, origin: Point, interest: Optional[str] = No
             tags.add(k)
     if "vegan" in tags:
         tags.add("vegetarian")
+    hours = props.get("opening_hours") or raw.get("opening_hours")
     return Venue(
         id=props.get("place_id") or f"{name}:{lat:.5f}:{lon:.5f}",
         name=name,
         address=props.get("formatted") or props.get("address_line2"),
         lat=lat, lon=lon, categories=cats, kind=kind,  # type: ignore[arg-type]
         indoor=not has_category(cats, a["outdoor_categories"]),
-        opening_hours=props.get("opening_hours") or raw.get("opening_hours"),
+        opening_hours=hours, hours_source="search" if hours else "none",
         website=props.get("website") or (props.get("contact") or {}).get("website"),
         distance_m=round(haversine_km(origin.lat, origin.lon, lat, lon) * 1000),
         matched_interest=interest,
