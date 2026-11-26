@@ -157,12 +157,6 @@ def chat_tab() -> None:
 
 # ---- results ---------------------------------------------------------------
 
-def show_trace(trace: list[dict], title: str = "Agent trace (what the assistant did)") -> None:
-    with st.expander(title):
-        for s in trace:
-            st.markdown(f"{ICON.get(s['status'], '•')} **{s['id']}. {s['name']}** · {s['duration_ms']} ms  \n{s['summary']}")
-
-
 def show_map(it: dict) -> None:
     pts = [{"lat": s["venue"]["lat"], "lon": s["venue"]["lon"]} for s in it["stops"]]
     if it.get("origin"):
@@ -228,8 +222,9 @@ def show_proposal(r: dict, p: dict, key: str) -> None:
                              key=f"accept-{key}-{p['id']}")
     if st.button(f"Approve “{p['title']}”", type="primary", key=f"approve-{key}-{p['id']}",
                  disabled=p["requires_budget_approval"] and not accept):
-        data, err = call("/api/v1/finalize", {"preferences": r["preferences"], "proposal": p, "temporal": r["temporal"],
-                                              "weather": r["weather"], "approved": True, "accept_extra_budget": accept})
+        with st.spinner("Finalising your plan, this can take 10-20 seconds. Please don't click again."):
+            data, err = call("/api/v1/finalize", {"preferences": r["preferences"], "proposal": p, "temporal": r["temporal"],
+                                                  "weather": r["weather"], "approved": True, "accept_extra_budget": accept})
         if err:
             st.error(err)
         else:
@@ -265,7 +260,6 @@ def show_final(f: dict, key: str) -> None:
     st.markdown("**Caveats**")
     for c in f["caveats"]:
         st.write(f"- {c}")
-    show_trace(f["trace"], "Finalisation trace")
 
 
 def show_response(r: dict, key: str) -> None:
@@ -291,13 +285,8 @@ def show_response(r: dict, key: str) -> None:
             for tab, p in zip(tabs, props):
                 with tab:
                     show_proposal(r, p, key)
-    if r["warnings"]:
-        with st.expander(f"Warnings and limitations ({len(r['warnings'])})"):
-            for x in r["warnings"]:
-                st.write(f"- {x}")
     if r["llm"] and not any(i["used"] for i in r["llm"]):
         st.caption("AI language features were unavailable, so deterministic logic was used (reduced AI functionality).")
-    show_trace(r["trace"])
 
 
 def show_trip(trip: dict) -> None:
@@ -315,8 +304,6 @@ def show_trip(trip: dict) -> None:
               delta_color="normal" if trip["within_budget"] else "inverse")
     c3.metric("Fixed costs you entered", money(cur, trip["fixed_costs"]))
     st.write(trip["message"])
-    for w in trip["warnings"]:
-        st.caption(f"⚠️ {w}")
     tabs = st.tabs([f"Day {d['day']} · {dt.date.fromisoformat(d['date']):%a %d %b}" for d in trip["days"]])
     for tab, d in zip(tabs, trip["days"]):
         with tab:

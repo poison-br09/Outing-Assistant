@@ -1,5 +1,8 @@
 """FastAPI entrypoint. Stateless: no database, no server-side sessions."""
 import logging
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
+import time
 
 from fastapi import FastAPI, HTTPException
 
@@ -10,9 +13,28 @@ from .schemas.api import AgentResponse, FinalizeRequest, FinalPlan, PlanRequest,
 from .services import routing
 
 settings = get_settings()
-logging.basicConfig(level=settings.log_level, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+_logs = Path(__file__).resolve().parents[2] / "logs"
+_logs.mkdir(exist_ok=True)
+logging.basicConfig(
+    level=settings.log_level,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+    handlers=[logging.StreamHandler(), RotatingFileHandler(_logs / "app.log", maxBytes=5_000_000, backupCount=3)],
+)
 
 app = FastAPI(title="Outing Assistant API", version="1.0.0")
+logging.getLogger("httpx").setLevel(logging.WARNING)  # its INFO lines print URLs, which carry API keys
+api_log = logging.getLogger("app.api")
+
+
+@app.middleware("http")
+async def log_io(request, call_next):
+    t0 = time.monotonic()
+    body = (await request.body()).decode("utf-8", "replace")
+    api_log.info("REQ %s %s body=%.2000s", request.method, request.url.path, body)
+    resp = await call_next(request)
+    api_log.info("RES %s %s -> %s in %dms", request.method, request.url.path, resp.status_code,
+                 (time.monotonic() - t0) * 1000)
+    return resp
 agent = Orchestrator()
 
 

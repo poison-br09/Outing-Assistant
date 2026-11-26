@@ -77,12 +77,15 @@ class LLMClient:
                 timeout=self.settings.llm_request_timeout_seconds,
                 max_retries=0,  # retries are ours, so they stay bounded and traced
             )
+        log.info("LLM request model=%s system=%.1500s user=%.3000s", self.settings.nvidia_nemotron_model, system, user)
         resp = self._client.chat.completions.create(
             model=self.settings.nvidia_nemotron_model,
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user}],
             temperature=0.2,
         )
-        return resp.choices[0].message.content or ""
+        out = resp.choices[0].message.content or ""
+        log.info("LLM response usage=%s content=%.3000s", getattr(resp, "usage", None), out)
+        return out
 
     def complete_json(self, system: str, user: str, schema: type[T]) -> tuple[T, LLMInfo]:
         if not self.enabled:
@@ -115,7 +118,8 @@ class LLMClient:
                     used=True, model=self.settings.nvidia_nemotron_model, attempts=attempt, latency_ms=ms
                 )
             _bump("latency_ms", int((time.monotonic() - t0) * 1000))
-            log.warning("LLM attempt %d/%d failed: %s", attempt, attempts, reason)
+            log.warning("LLM attempt %d/%d failed: %s (%dms)", attempt, attempts, reason,
+                        (time.monotonic() - t0) * 1000)
         raise LLMUnavailable(reason)
 
 

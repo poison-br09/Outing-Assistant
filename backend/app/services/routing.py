@@ -2,10 +2,14 @@
 import datetime as dt
 from typing import Optional
 
+import logging
+
 import httpx
 
 from ..config import get_settings
 from .geo import ProviderError
+
+log = logging.getLogger(__name__)
 
 _URL = "https://routes.googleapis.com/directions/v2:computeRoutes"
 _MODES = {"walking": "WALK", "public_transport": "TRANSIT", "two_wheeler": "TWO_WHEELER", "car": "DRIVE", "taxi": "DRIVE"}
@@ -39,6 +43,7 @@ def compute_route(
         r = httpx.post(_URL, json=body, headers=headers, timeout=s.http_timeout_seconds)
         r.raise_for_status()
         route = r.json()["routes"][0]
+        log.info("PROVIDER google-routes POST body=%s -> %s %s", body, r.status_code, route)
     except httpx.HTTPStatusError as e:
         raise ProviderError("google-routes", f"HTTP {e.response.status_code}") from None
     except (httpx.HTTPError, KeyError, IndexError, ValueError) as e:

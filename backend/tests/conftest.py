@@ -84,3 +84,14 @@ def form(date: dt.date, **over) -> dict:
         "constraints": ["vegetarian", "avoid crowded places"],
     }
     return {**base, **over}
+
+
+@pytest.fixture(autouse=True)
+def no_keys(monkeypatch):
+    """Tests never use real keys from .env (no network, deterministic)."""
+    from app.config import get_settings
+    for k in ("NVIDIA_API_KEY", "NVIDIA_NEMOTRON_MODEL", "GEOAPIFY_API_KEY", "GOOGLE_MAPS_API_KEY"):
+        monkeypatch.setenv(k, "")
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()

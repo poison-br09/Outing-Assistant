@@ -4,6 +4,7 @@ Error text deliberately never includes URLs: they can carry API keys.
 """
 import datetime as dt
 import logging
+import time
 from typing import Optional
 
 import httpx
@@ -22,13 +23,21 @@ class ProviderError(Exception):
 
 
 def _get(provider: str, url: str, params: dict) -> dict:
+    safe = {k: v for k, v in params.items() if k.lower() != "apikey"}
+    t0 = time.monotonic()
     try:
         r = httpx.get(url, params=params, timeout=get_settings().http_timeout_seconds)
         r.raise_for_status()
-        return r.json()
+        data = r.json()
+        log.info("PROVIDER %s GET %s params=%s -> %s in %dms, %d bytes", provider, url.split("?")[0], safe,
+                 r.status_code, (time.monotonic() - t0) * 1000, len(r.content))
+        log.debug("PROVIDER %s body=%.1500s", provider, r.text)
+        return data
     except httpx.HTTPStatusError as e:
+        log.warning("PROVIDER %s GET %s params=%s -> HTTP %s", provider, url, safe, e.response.status_code)
         raise ProviderError(provider, f"HTTP {e.response.status_code}") from None
     except (httpx.HTTPError, ValueError) as e:
+        log.warning("PROVIDER %s GET %s params=%s -> %s", provider, url, safe, type(e).__name__)
         raise ProviderError(provider, type(e).__name__) from None
 
 
@@ -42,16 +51,29 @@ def _geoapify_key() -> str:
 # ---- Open-Meteo (no key) -------------------------------------------------
 
 def resolve_city(name: str) -> Optional[Location]:
-    """City -> coordinates + IANA timezone. None when the city is not found."""
+    """City -> coordinates + IANA timezone. None when the city is not found.
+
+    Geoapify first (knows aliases like Bangalore); Open-Meteo is the keyless fallback.
+    """
+    if get_settings().geoapify_api_key:
+        try:
+            feats = _get("geoapify", f"{get_settings().geoapify_base_url}/v1/geocode/search",
+                         {"text": name, "type": "city", "limit": 1, "apiKey": _geoapify_key()}).get("features") or []
+            if feats and (p := feats[0]["properties"]).get("timezone", {}).get("name"):
+                return Location(name=p.get("city") or p.get("name") or name, lat=p["lat"], lon=p["lon"],
+                                timezone=p["timezone"]["name"], country=p.get("country"))
+        except ProviderError:
+            pass
     data = _get(
         "open-meteo-geocoding",
         "https://geocoding-api.open-meteo.com/v1/search",
-        {"name": name, "count": 1, "language": "en", "format": "json"},
+        {"name": name, "count": 10, "language": "en", "format": "json"},
     )
     results = data.get("results") or []
     if not results:
         return None
-    r = results[0]
+    # top hit can be a tiny namesake (Bangalore -> a Karachi suburb): prefer the most populous
+    r = max(results, key=lambda x: x.get("population") or 0)
     return Location(
         name=r["name"], lat=r["latitude"], lon=r["longitude"],
         timezone=r.get("timezone", "UTC"), country=r.get("country"),
