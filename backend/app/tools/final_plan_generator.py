@@ -11,6 +11,7 @@ from ..schemas.api import FinalPlan, TimelineEntry
 from ..schemas.context import TemporalContext, WeatherReport
 from ..schemas.itinerary import PlanProposal
 from ..schemas.preferences import Preferences
+from .calendar_export import build_ics, google_calendar_link
 
 
 class _Overview(BaseModel):
@@ -75,4 +76,6 @@ def generate_final_plan(
         overview=overview, timeline=timeline,
         cost_lines=[l.model_dump() for l in cost.lines], total_cost=cost.total, per_person=cost.per_person,
         currency=cost.currency, practical_notes=notes, caveats=caveats, llm=info,
+        route_link=it.route_url, calendar_link=google_calendar_link(proposal, prefs.city),
+        ics=build_ics(proposal, prefs.city),
     )
