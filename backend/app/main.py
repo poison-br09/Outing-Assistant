@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException
 from .agent.orchestrator import Orchestrator
 from .config import get_settings
 from .llm.client import get_metrics
-from .schemas.api import AgentResponse, FinalizeRequest, FinalPlan, PlanRequest
+from .schemas.api import AgentResponse, FinalizeRequest, FinalPlan, PlanRequest, TripRequest, TripResponse
 from .services import routing
 
 settings = get_settings()
@@ -34,6 +34,11 @@ def metrics() -> dict:
 @app.post("/api/v1/plan", response_model=AgentResponse)
 def plan(req: PlanRequest) -> AgentResponse:
     return agent.run(req)
+
+
+@app.post("/api/v1/trip", response_model=TripResponse)
+def trip(req: TripRequest) -> TripResponse:
+    return agent.run_trip(req)
 
 
 @app.post("/api/v1/finalize", response_model=FinalPlan)

@@ -16,7 +16,8 @@ ICON = {"success": "✅", "warning": "⚠️", "failed": "❌", "running": "⏳"
         "pass": "✅", "warn": "⚠️", "fail": "❌"}
 
 st.set_page_config(page_title="Outing Assistant", page_icon="🗓️", layout="wide")
-for key, default in {"chat": [], "fields": {}, "resp": None, "final": None, "last_req": None}.items():
+for key, default in {"chat": [], "fields": {}, "resp": None, "trip": None, "finals": {}, "last": None,
+                     "excluded": []}.items():
     st.session_state.setdefault(key, default)
 
 
@@ -35,16 +36,32 @@ def call(path: str, payload: dict):
     return r.json(), None
 
 
-def plan(req: dict, excluded: list[str] | None = None) -> None:
-    st.session_state.last_req = req
-    with st.spinner("Planning your outing: checking weather, finding places, costing and validating…"):
-        data, err = call("/api/v1/plan", {**req, "excluded_venue_ids": excluded or []})
-    st.session_state.final = None
+def plan(req: dict, days: int = 1, fixed: float = 0.0, reset_exclusions: bool = True) -> None:
+    """Single outing (days == 1) or multi-day trip. Remembers the request so 'Swap' can re-plan."""
+    if reset_exclusions:
+        st.session_state.excluded = []
+    st.session_state.last = {"req": req, "days": days, "fixed": fixed}
+    req = {**req, "excluded_venue_ids": st.session_state.excluded}
+    with st.spinner("Planning: checking weather, finding places, costing and validating…"):
+        if days > 1:
+            data, err = call("/api/v1/trip", {"plan": req, "days": days, "fixed_costs": fixed})
+        else:
+            data, err = call("/api/v1/plan", req)
+    st.session_state.finals = {}
     if err:
         st.error(err)
         return
-    st.session_state.resp = data
-    st.session_state.fields = data.get("partial", {})
+    if days > 1:
+        st.session_state.trip, st.session_state.resp = data, None
+    else:
+        st.session_state.resp, st.session_state.trip = data, None
+        st.session_state.fields = data.get("partial", {})
+
+
+def swap(venue_id: str) -> None:
+    st.session_state.excluded = st.session_state.excluded + [venue_id]
+    last = st.session_state.last
+    plan(last["req"], last["days"], last["fixed"], reset_exclusions=False)
 
 
 def hm(iso: str) -> str:
@@ -93,6 +110,9 @@ def form_tab() -> None:
         flex_min = c3.number_input("Flexibility (min, tentative)", 0, 240, 30, step=15)
         period = c4.selectbox("Period (flexible)", ["any", "morning", "afternoon", "evening", "night"])
         hours = st.number_input("Hours available (flexible period)", 0.5, 24.0, 4.0, step=0.5)
+        c1, c2 = st.columns(2)
+        days = c1.number_input("Days (1 = single outing, 2-5 = trip starting on the date above)", 1, 5, 1)
+        fixed = c2.number_input("Trip fixed costs: lodging, intercity travel (trips only, optional)", 0, value=0, step=500)
 
         st.subheader("🎯 Mood, interests & constraints")
         mood = st.text_input("Mood", placeholder="e.g. tired but wants to do something fun")
@@ -116,7 +136,7 @@ def form_tab() -> None:
                      flexibility_minutes=int(flex_min))
         else:
             f.update(timing_mode="period", preferred_period=period, available_duration_minutes=int(hours * 60))
-        plan({"fields": f, "message": notes or None, "message_overrides": False})
+        plan({"fields": f, "message": notes or None, "message_overrides": False}, int(days), float(fixed))
 
 
 def chat_tab() -> None:
@@ -143,7 +163,16 @@ def show_trace(trace: list[dict], title: str = "Agent trace (what the assistant 
             st.markdown(f"{ICON.get(s['status'], '•')} **{s['id']}. {s['name']}** · {s['duration_ms']} ms  \n{s['summary']}")
 
 
-def show_proposal(r: dict, p: dict) -> None:
+def show_map(it: dict) -> None:
+    pts = [{"lat": s["venue"]["lat"], "lon": s["venue"]["lon"]} for s in it["stops"]]
+    if it.get("origin"):
+        pts.insert(0, {"lat": it["origin"]["lat"], "lon": it["origin"]["lon"]})
+    st.map(pts, size=40, zoom=13)
+    if it.get("route_url"):
+        st.link_button("Open the whole route in Google Maps", it["route_url"])
+
+
+def show_proposal(r: dict, p: dict, key: str) -> None:
     cur, cost, it = r["currency"], p["cost"], p["itinerary"]
     c1, c2, c3 = st.columns(3)
     c1.metric("Estimated total", money(cur, cost["total"]))
@@ -158,12 +187,12 @@ def show_proposal(r: dict, p: dict) -> None:
         v = s["venue"]
         route = s.get("route")
         with st.container(border=True):
-            top, btn = st.columns([5, 1])
+            top, nav, btn = st.columns([6, 1, 1])
             top.markdown(f"**{hm(s['start'])}-{hm(s['end'])} · {'🍽️' if v['kind'] == 'food' else '🎯'} {v['name']}**  \n"
                          f"{v.get('address') or ''}")
-            if btn.button("Swap", key=f"swap-{p['id']}-{v['id']}", help="Plan again without this place"):
-                st.session_state.excluded = st.session_state.get("excluded", []) + [v["id"]]
-                plan(st.session_state.last_req, st.session_state.excluded)
+            nav.link_button("Go", f"https://www.google.com/maps/dir/?api=1&destination={v['lat']},{v['lon']}")
+            if btn.button("Swap", key=f"swap-{key}-{p['id']}-{v['id']}", help="Plan again without this place"):
+                swap(v["id"])
                 st.rerun()
             if s["why"]:
                 st.write(s["why"])
@@ -172,13 +201,16 @@ def show_proposal(r: dict, p: dict) -> None:
                 bits.append(f"🚗 {route['duration_min']:.0f} min {route['mode'].replace('_', ' ')}, {route['distance_km']:.1f} km "
                             f"({'estimate' if route['source'] == 'estimate' else 'traffic-aware'})")
             if s.get("availability"):
+                a = s["availability"]
                 bits.append({"open": "🟢 open per provider hours", "closed": "🔴 closed",
-                             "unverified": "🟡 hours unverified"}[s["availability"]["status"]])
+                             "unverified": "🟡 hours unverified"}[a["status"]])
             if s.get("crowd"):
                 bits.append(f"👥 crowd: {s['crowd']['level']} (heuristic)")
             st.caption(" · ".join(bits))
     for n in it["notes"]:
         st.caption(f"ℹ️ {n}")
+    with st.expander("🗺️ Map and route", expanded=False):
+        show_map(it)
 
     left, right = st.columns(2)
     with left:
@@ -193,19 +225,19 @@ def show_proposal(r: dict, p: dict) -> None:
     accept = False
     if p["requires_budget_approval"]:
         accept = st.checkbox(f"I approve spending {money(cur, cost['over_by'])} over my budget (within the 10% limit)",
-                             key=f"accept-{p['id']}")
-    if st.button(f"Approve “{p['title']}”", type="primary", key=f"approve-{p['id']}",
+                             key=f"accept-{key}-{p['id']}")
+    if st.button(f"Approve “{p['title']}”", type="primary", key=f"approve-{key}-{p['id']}",
                  disabled=p["requires_budget_approval"] and not accept):
         data, err = call("/api/v1/finalize", {"preferences": r["preferences"], "proposal": p, "temporal": r["temporal"],
                                               "weather": r["weather"], "approved": True, "accept_extra_budget": accept})
         if err:
             st.error(err)
         else:
-            st.session_state.final = data
+            st.session_state.finals[key] = data
             st.rerun()
 
 
-def show_final(f: dict) -> None:
+def show_final(f: dict, key: str) -> None:
     st.success("Plan approved. Nothing has been booked: use the notes and links below.")
     st.write(f["overview"])
     for t in f["timeline"]:
@@ -216,7 +248,15 @@ def show_final(f: dict) -> None:
             if t.get("travel_note"):
                 st.caption(f"Getting there: {t['travel_note']}")
             if t.get("map_link"):
-                st.link_button("Navigate", t["map_link"])
+                st.link_button("Navigate", t["map_link"], key=f"nav-{key}-{t['time']}")
+    c1, c2, c3 = st.columns(3)
+    if f.get("route_link"):
+        c1.link_button("🗺️ Full route", f["route_link"])
+    if f.get("calendar_link"):
+        c2.link_button("📅 Google Calendar", f["calendar_link"])
+    if f.get("ics"):
+        c3.download_button("⬇️ Add to calendar (.ics)", f["ics"], file_name=f"outing-{key}.ics",
+                           mime="text/calendar", key=f"ics-{key}")
     st.metric("Estimated total", money(f["currency"], f["total_cost"]), f"{money(f['currency'], f['per_person'])} per person",
               delta_color="off")
     st.markdown("**Practical notes**")
@@ -228,11 +268,8 @@ def show_final(f: dict) -> None:
     show_trace(f["trace"], "Finalisation trace")
 
 
-def show_results() -> None:
-    r = st.session_state.resp
-    if not r:
-        return
-    st.divider()
+def show_response(r: dict, key: str) -> None:
+    """One day's (or the single outing's) result: clarification, fallback, proposals or the final plan."""
     if r["status"] == "needs_clarification":
         st.info(r["message"])
         for q in r["questions"]:
@@ -243,27 +280,57 @@ def show_results() -> None:
             st.write(f"- {s}")
     else:
         t, w = r["temporal"], r.get("weather")
-        st.subheader(f"Your outing on {dt.date.fromisoformat(t['date']):%A %d %b %Y}")
         st.caption(("Weather: " + w["summary"] + " (Open-Meteo)") if w and w["available"] else "Weather: unavailable")
         for a in r["assumptions"]:
             st.caption(f"Assumption: {a}")
-        if st.session_state.final:
-            show_final(st.session_state.final)
+        if key in st.session_state.finals:
+            show_final(st.session_state.finals[key], key)
         else:
-            rec = r["recommended_id"]
-            props = r["proposals"]
+            rec, props = r["recommended_id"], r["proposals"]
             tabs = st.tabs([("⭐ " if p["id"] == rec else "") + p["title"] for p in props])
             for tab, p in zip(tabs, props):
                 with tab:
-                    show_proposal(r, p)
+                    show_proposal(r, p, key)
     if r["warnings"]:
         with st.expander(f"Warnings and limitations ({len(r['warnings'])})"):
             for x in r["warnings"]:
                 st.write(f"- {x}")
-    llm = [i for i in r["llm"]]
-    if llm and not any(i["used"] for i in llm):
+    if r["llm"] and not any(i["used"] for i in r["llm"]):
         st.caption("AI language features were unavailable, so deterministic logic was used (reduced AI functionality).")
     show_trace(r["trace"])
+
+
+def show_trip(trip: dict) -> None:
+    cur = trip["currency"]
+    if trip["status"] == "needs_clarification":
+        st.info(trip["message"])
+        for q in trip["questions"]:
+            st.write(f"- {q}")
+        return
+    st.subheader(f"Your {len(trip['days'])}-day trip")
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Trip budget", money(cur, trip["trip_budget"]))
+    c2.metric("Estimated total (recommended plans + fixed costs)", money(cur, trip["estimated_total"]),
+              delta="within budget" if trip["within_budget"] else "over budget",
+              delta_color="normal" if trip["within_budget"] else "inverse")
+    c3.metric("Fixed costs you entered", money(cur, trip["fixed_costs"]))
+    st.write(trip["message"])
+    for w in trip["warnings"]:
+        st.caption(f"⚠️ {w}")
+    tabs = st.tabs([f"Day {d['day']} · {dt.date.fromisoformat(d['date']):%a %d %b}" for d in trip["days"]])
+    for tab, d in zip(tabs, trip["days"]):
+        with tab:
+            show_response(d["response"], f"day{d['day']}")
+
+
+def show_results() -> None:
+    st.divider()
+    if st.session_state.trip:
+        show_trip(st.session_state.trip)
+    elif (r := st.session_state.resp):
+        if r["status"] == "proposal":
+            st.subheader(f"Your outing on {dt.date.fromisoformat(r['temporal']['date']):%A %d %b %Y}")
+        show_response(r, "single")
 
 
 st.title("🗓️ Outing Assistant")

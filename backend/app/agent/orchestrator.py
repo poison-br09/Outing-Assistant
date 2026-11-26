@@ -8,7 +8,8 @@ from typing import Optional
 from zoneinfo import ZoneInfo
 
 from ..config import get_assumptions
-from ..schemas.api import AgentResponse, FinalizeRequest, FinalPlan, LLMInfo, PlanRequest
+from ..schemas.api import (AgentResponse, DayPlan, FinalizeRequest, FinalPlan, LLMInfo, PlanRequest,
+                           TripRequest, TripResponse)
 from ..schemas.context import Location, Point, RouteEstimate, TemporalContext, WeatherReport
 from ..schemas.itinerary import Itinerary, PlanProposal, RankedVenue, Venue
 from ..schemas.preferences import Preferences
@@ -21,10 +22,11 @@ from ..tools.food_finder import get_food_options
 from ..tools.itinerary_optimizer import optimise_itinerary
 from ..tools.itinerary_planner import select_for_variant, stop_duration
 from ..tools.plan_validator import validate_plan
-from ..tools.preference_parser import parse_user_preferences
+from ..tools.preference_parser import ParseResult, parse_user_preferences
 from ..tools.temporal_resolver import candidate_starts, resolve_temporal_context
 from ..tools.traffic_tool import get_traffic_report
 from ..tools.venue_availability import get_venue_availability
+from ..tools.venue_verifier import verify_venues
 from ..tools.weather_tool import get_weather_report
 from .fallbacks import generic_suggestions
 from .narrator import explain_proposal
@@ -48,8 +50,9 @@ def llm_note(info: Optional[LLMInfo]) -> str:
 
 
 class _Run:
-    def __init__(self, req: PlanRequest):
+    def __init__(self, req: PlanRequest, preparsed: Optional[ParseResult] = None):
         self.req = req
+        self.preparsed = preparsed  # trips parse once, then reuse per day
         self.trace = Trace()
         self.llm: list[LLMInfo] = []
         self.warnings: list[str] = []
@@ -89,7 +92,9 @@ def _centroid(venues: list[Venue], fallback: Point) -> Point:
 class Orchestrator:
     # ------------------------------------------------------------------ plan
     def run(self, req: PlanRequest) -> AgentResponse:
-        r = _Run(req)
+        return self._execute(_Run(req))
+
+    def _execute(self, r: _Run) -> AgentResponse:
         try:
             return self._run(r)
         except Exception as e:  # last-resort safety net: always return something useful
@@ -103,7 +108,7 @@ class Orchestrator:
 
         # 1. preferences
         with trace.step("Preferences parsed") as st:
-            parsed = parse_user_preferences(req.fields, req.message, req.message_overrides)
+            parsed = r.preparsed or parse_user_preferences(req.fields, req.message, req.message_overrides)
             if parsed.llm:
                 r.llm.append(parsed.llm)
             r.partial, r.assumptions = parsed.partial, parsed.assumptions
@@ -228,12 +233,15 @@ class Orchestrator:
 
         # 8. availability pre-filter
         with trace.step("Venue availability checked") as st:
+            rep = verify_venues([x.venue for x in ranked[:10]])
             before = len(ranked)
             ranked = [x for x in ranked if not _never_open(x.venue, temporal)]
             unverified = sum(1 for x in ranked if not x.venue.opening_hours)
             msg = f"Dropped {before - len(ranked)} venue(s) closed throughout your window"
+            if rep.enriched:
+                msg += f"; filled in hours for {rep.enriched} venue(s) from place details"
             if unverified:
-                st.warn(f"{msg}; {unverified} of {len(ranked)} have no hours data (kept, flagged as unverified)")
+                st.warn(f"{msg}; {unverified} of {len(ranked)} still have no hours data (kept, flagged as unverified)")
             else:
                 st.ok(msg + " (provider hours, not live-verified)")
             if not ranked:
@@ -243,6 +251,7 @@ class Orchestrator:
         with trace.step("Food options retrieved") as st:
             anchor = _centroid([x.venue for x in ranked[:3]], start_pt)
             food = get_food_options(anchor, prefs, prefs.total_budget, temporal, radius)
+            verify_venues([f.venue for f in food.venues[:6]])
             foods = [f for f in food.venues if not _never_open(f.venue, temporal)]
             r.warnings += food.warnings + food.relaxed
             if foods and not food.relaxed:
@@ -360,6 +369,75 @@ class Orchestrator:
         safe = [p for p in proposals if not p.requires_budget_approval] or proposals
         balanced = next((p for p in safe if p.variant == "balanced"), None)
         return balanced or max(safe, key=lambda p: p.score)
+
+    # ------------------------------------------------------------------ trip
+    def run_trip(self, req: TripRequest) -> TripResponse:
+        """Plan N consecutive days: budget split per day, no venue repeated across days.
+
+        Lodging and intercity travel are never estimated: the user can supply them as fixed costs.
+        """
+        a = get_assumptions()
+        cur = a["currency"]
+        pr = req.plan
+        parsed = parse_user_preferences(pr.fields, pr.message, pr.message_overrides)
+        if parsed.preferences is None:
+            return TripResponse(status="needs_clarification", message="I need a little more information to plan this trip.",
+                                questions=parsed.questions, currency=cur)
+        prefs = parsed.preferences
+        budget = prefs.total_budget - req.fixed_costs
+        if budget <= 0:
+            return TripResponse(
+                status="needs_clarification", currency=cur,
+                message=f"Your fixed costs ({cur}{req.fixed_costs:,.0f}) use up the whole trip budget ({cur}{prefs.total_budget:,.0f}).",
+                questions=["Could you raise the trip budget or lower the fixed costs?"])
+        per_day = round(budget / req.days, 2)
+
+        start = prefs.date
+        if start is None:  # resolve the assumed Saturday once so each day gets its own date
+            try:
+                loc = resolve_city(prefs.city)
+            except ProviderError:
+                loc = None
+            if loc is None:
+                return TripResponse(status="needs_clarification", currency=cur,
+                                    message=f"I couldn't find a city called '{prefs.city}'.",
+                                    questions=["Which city should I plan the trip in?"])
+            start = resolve_temporal_context(prefs, loc).date
+
+        used: list[str] = list(pr.excluded_venue_ids)
+        days: list[DayPlan] = []
+        warnings: list[str] = []
+        total = req.fixed_costs
+        for i in range(req.days):
+            day_prefs = prefs.model_copy(update={
+                "date": start + dt.timedelta(days=i), "budget": per_day, "budget_type": "total",
+                "excluded_venue_ids": list(used)})
+            note = f"Trip budget: {cur}{per_day:,.0f} per day after {cur}{req.fixed_costs:,.0f} of fixed costs."
+            run = _Run(PlanRequest(excluded_venue_ids=used),
+                       ParseResult(preferences=day_prefs, partial=parsed.partial,
+                                   assumptions=[*parsed.assumptions, note]))
+            resp = self._execute(run)
+            days.append(DayPlan(day=i + 1, date=day_prefs.date, response=resp))
+            if resp.status == "proposal":
+                rec = next(p for p in resp.proposals if p.id == resp.recommended_id)
+                used += [s.venue.id for s in rec.itinerary.stops]
+                total += rec.cost.total
+            else:
+                warnings.append(f"Day {i + 1}: {resp.message}")
+        ok = [d for d in days if d.response.status == "proposal"]
+        trip_budget = prefs.total_budget
+        within = total <= trip_budget
+        if not within:
+            warnings.append(f"Estimated trip total {cur}{total:,.0f} exceeds your trip budget {cur}{trip_budget:,.0f}.")
+        warnings.append("Lodging and intercity travel are not estimated"
+                        + (f" (only your {cur}{req.fixed_costs:,.0f} of fixed costs is included)." if req.fixed_costs else
+                           ": enter them as fixed costs to include them."))
+        return TripResponse(
+            status="proposal" if ok else "fallback",
+            message=(f"{len(ok)} of {req.days} days planned. Review and approve each day."
+                     if ok else "I couldn't plan any of these days."),
+            days=days, trip_budget=trip_budget, fixed_costs=req.fixed_costs, estimated_total=round(total),
+            within_budget=within, warnings=warnings, assumptions=parsed.assumptions, currency=cur)
 
     # -------------------------------------------------------------- finalize
     def finalize(self, req: FinalizeRequest) -> FinalPlan:
