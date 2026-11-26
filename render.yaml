@@ -1,0 +1,23 @@
+# Render Blueprint: one Docker web service (Streamlit public, FastAPI internal).
+# Secrets are not stored here: set them in the Render dashboard (sync: false).
+services:
+  - type: web
+    name: outing-assistant
+    runtime: docker
+    plan: free
+    healthCheckPath: /_stcore/health
+    envVars:
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: NVIDIA_NEMOTRON_MODEL
+        sync: false
+      - key: NVIDIA_BASE_URL
+        value: https://integrate.api.nvidia.com/v1
+      - key: GEOAPIFY_API_KEY
+        sync: false
+      - key: GOOGLE_MAPS_API_KEY
+        sync: false
+      - key: LLM_REQUEST_TIMEOUT_SECONDS
+        value: "20"
+      - key: LLM_MAX_RETRIES
+        value: "1"
