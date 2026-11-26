@@ -1,9 +1,11 @@
 import datetime as dt
 from typing import Literal, Optional
 
-from pydantic import BaseModel
+from urllib.parse import urlencode
 
-from .context import Availability, CrowdEstimate, RouteEstimate
+from pydantic import BaseModel, computed_field
+
+from .context import Availability, CrowdEstimate, Point, RouteEstimate
 
 
 class Venue(BaseModel):
@@ -16,6 +18,7 @@ class Venue(BaseModel):
     kind: Literal["activity", "food"]
     indoor: bool = True
     opening_hours: Optional[str] = None
+    hours_source: Literal["search", "place_details", "none"] = "none"
     website: Optional[str] = None
     distance_m: float = 0.0
     matched_interest: Optional[str] = None
@@ -46,9 +49,14 @@ class Stop(BaseModel):
     why: str = ""
 
 
+_GMAPS_MODE = {"walking": "walking", "public_transport": "transit", "two_wheeler": "two-wheeler",
+               "car": "driving", "taxi": "driving"}
+
+
 class Itinerary(BaseModel):
     variant: str
     departs_at: dt.datetime
+    origin: Optional[Point] = None
     stops: list[Stop]
     return_route: Optional[RouteEstimate] = None
     total_travel_min: float = 0.0
@@ -57,6 +65,22 @@ class Itinerary(BaseModel):
     @property
     def ends_at(self) -> dt.datetime:
         return self.stops[-1].end if self.stops else self.departs_at
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def route_url(self) -> Optional[str]:
+        """Google Maps directions link: start -> stops in order (navigation, not a booking)."""
+        if not self.stops:
+            return None
+        pts = [f"{s.venue.lat},{s.venue.lon}" for s in self.stops]
+        origin = f"{self.origin.lat},{self.origin.lon}" if self.origin else pts[0]
+        params = {"api": 1, "origin": origin, "destination": pts[-1]}
+        if len(pts) > 1:
+            params["waypoints"] = "|".join(pts[:-1])
+        first = self.stops[0].route
+        if first:
+            params["travelmode"] = _GMAPS_MODE.get(first.mode, "driving")
+        return "https://www.google.com/maps/dir/?" + urlencode(params)
 
 
 class CostLine(BaseModel):

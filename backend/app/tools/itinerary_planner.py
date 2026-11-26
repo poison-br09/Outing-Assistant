@@ -142,6 +142,6 @@ def build_itinerary(
     if ret:
         notes.append("Return journey is costed but not scheduled.")
     return Itinerary(
-        variant=variant, departs_at=start, stops=stops, return_route=ret,
+        variant=variant, departs_at=start, origin=start_point, stops=stops, return_route=ret,
         total_travel_min=round(travel, 1), notes=notes,
     )
