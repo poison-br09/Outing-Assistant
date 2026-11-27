@@ -322,7 +322,7 @@ def show_results() -> None:
 
 st.title("🗓️ Outing Assistant")
 st.caption("Less planning. More living.")
-tab_form, tab_chat = st.tabs(["📝 Fill a form", "💬 Chat with the assistant"])
+tab_chat, tab_form = st.tabs(["💬 Chat with the assistant", "📝 Fill a form"])
 with tab_form:
     form_tab()
 with tab_chat:
